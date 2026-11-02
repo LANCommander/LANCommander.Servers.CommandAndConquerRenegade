@@ -1,0 +1,46 @@
+#!/bin/sh
+# Start the Renegade (Tiberian Technologies) dedicated server (START_EXE).
+#
+# Runs `server.exe` from the server root under Wine. server.exe is a GUI-subsystem program that
+# opens its own console window, so wine-run wraps it in Xvfb (WINE_XVFB=auto). Nothing reaches
+# stdout from that window; the server's log file, Renegade/FDS/renlog_<M>-<D>-<YYYY>.txt
+# (a new one each day), is followed into `docker logs` instead. Any START_ARGS are appended.
+set -e
+
+root="${SERVER_ROOT:-/config/Merged}"
+cd "$root"
+
+exe=$(find . -maxdepth 1 -iname server.exe | head -n 1)
+if [ -z "$exe" ]; then
+    echo "server.exe not found in $root. Check RENEGADE_SERVER_URL." >&2
+    exit 1
+fi
+exe=${exe#./}
+
+printf 'Starting: %s %s\n' "$exe" "$*"
+printf 'Game port %s/udp (%s mode)\n' "${RENEGADE_PORT:-4848}" "${RENEGADE_GAME_TYPE:-LAN}"
+
+# Follow the newest renlog (Renegade/FDS/renlog_*.txt), switching when the server starts a new
+# one at the day change. A day's log is appended to across restarts, so a file that already
+# existed is followed from its size at this start.
+stamp=$(mktemp)
+sizes=$(mktemp)
+find . -maxdepth 3 -iname 'renlog_*.txt' -printf '%p\t%s\n' > "$sizes" 2>/dev/null || true
+(
+    current=""
+    tailpid=""
+    while :; do
+        newest=$(find . -maxdepth 3 -iname 'renlog_*.txt' -newer "$stamp" -printf '%T@ %p\n' 2>/dev/null \
+            | sort -n | tail -n 1 | cut -d' ' -f2-)
+        if [ -n "$newest" ] && [ "$newest" != "$current" ]; then
+            [ -n "$tailpid" ] && kill "$tailpid" 2>/dev/null
+            size=$(awk -F '\t' -v f="$newest" '$1 == f { print $2 }' "$sizes")
+            tail -c +$(( ${size:-0} + 1 )) -F "$newest" 2>/dev/null | sed -u 's/\r$//' &
+            tailpid=$!
+            current="$newest"
+        fi
+        sleep 5
+    done
+) &
+
+exec wine-run "$exe" "$@"
